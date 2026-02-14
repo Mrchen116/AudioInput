@@ -8,6 +8,7 @@ struct RecordedAudio {
 enum AppError: Error, LocalizedError {
     case invalidState(String)
     case emptyTranscription
+    case missingCredentials
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +16,8 @@ enum AppError: Error, LocalizedError {
             return message
         case .emptyTranscription:
             return "No transcription text returned"
+        case .missingCredentials:
+            return "APP_ID or ACCESS_TOKEN is empty. Set them in Settings."
         }
     }
 }

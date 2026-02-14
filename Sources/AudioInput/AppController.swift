@@ -4,12 +4,14 @@ import Foundation
 @MainActor
 final class AppController {
     private let config: AppConfig
+    private let settingsStore: SettingsStore
     private let recorder: AudioRecorder
     private let asrClient: ASRClient
     private let inserter: TextInserter
     private let monitor: HotkeyMonitor
     private let statusBar: StatusBarController
     private let notifier: Notifier
+    private let structuredLogger: StructuredLogger
 
     private var state: InputState = .idle {
         didSet { statusBar.update(state: state) }
@@ -17,30 +19,42 @@ final class AppController {
 
     private var cancelCurrentRecording = false
     private var timeoutTimer: Timer?
+    private var settingsWindowController: SettingsWindowController?
+    private var lastRecordStopAt: Date = .distantPast
 
     init(
         config: AppConfig,
+        settingsStore: SettingsStore,
         recorder: AudioRecorder,
         asrClient: ASRClient,
         inserter: TextInserter,
         monitor: HotkeyMonitor,
         statusBar: StatusBarController,
-        notifier: Notifier
+        notifier: Notifier,
+        structuredLogger: StructuredLogger
     ) {
         self.config = config
+        self.settingsStore = settingsStore
         self.recorder = recorder
         self.asrClient = asrClient
         self.inserter = inserter
         self.monitor = monitor
         self.statusBar = statusBar
         self.notifier = notifier
+        self.structuredLogger = structuredLogger
 
         wireEvents()
     }
 
     func start() {
+        AudioRecorder.cleanupStaleTemporaryFiles()
         state = .idle
         statusBar.onQuit = { NSApplication.shared.terminate(nil) }
+        statusBar.onOpenSettings = { [weak self] in self?.openSettings() }
+        statusBar.onSelfCheck = { [weak self] in self?.runSelfCheck() }
+
+        applySettingsRuntimeEffects()
+
         notifier.requestAuthorization()
         PermissionHelper.requestMicrophoneAccess()
 
@@ -58,10 +72,12 @@ final class AppController {
                 title: "Audio Input",
                 body: "Hotkeys unavailable. Grant Accessibility/Input Monitoring and relaunch."
             )
+            log(.error, event: "hotkey_monitor_unavailable", message: "Failed to start hotkey monitor")
             return
         }
 
-        notifier.notify(title: "Audio Input", body: "Ready: hold Right Command to talk")
+        notifier.notify(title: "Audio Input", body: "Ready: hold \(settingsStore.settings.hotkeySide.rawValue) Command to talk")
+        log(.info, event: "app_started", message: "AudioInput started")
     }
 
     private func wireEvents() {
@@ -81,18 +97,33 @@ final class AppController {
     private func startRecording() {
         guard case .idle = state else { return }
 
+        let debounceWindow = 0.2
+        if Date().timeIntervalSince(lastRecordStopAt) < debounceWindow {
+            return
+        }
+
+        if settingsStore.settings.appID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            settingsStore.settings.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            notifier.notify(title: "Audio Input", body: "Please set APP_ID and ACCESS_TOKEN in Settings")
+            log(.warning, event: "missing_credentials", message: "Cannot start recording because credentials are empty")
+            return
+        }
+
         do {
             try recorder.start()
             cancelCurrentRecording = false
             state = .recording(startAt: Date())
             notifier.notify(title: "Audio Input", body: "Recording...")
-            timeoutTimer = Timer.scheduledTimer(withTimeInterval: config.maxRecordSeconds, repeats: false) { [weak self] _ in
+
+            let timeout = TimeInterval(max(30, settingsStore.settings.maxRecordSeconds))
+            timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
                 Task { @MainActor in self?.finishRecording(timeout: true) }
             }
-            AppLogger.log.info("Recording started")
+            log(.info, event: "recording_started", message: "Recording started")
         } catch {
             state = .error(error.localizedDescription)
             notifier.notify(title: "Audio Input", body: "Recording failed: \(error.localizedDescription)")
+            log(.error, event: "recording_failed", message: error.localizedDescription)
             state = .idle
         }
     }
@@ -102,9 +133,10 @@ final class AppController {
         cancelCurrentRecording = true
         recorder.cancel()
         clearTimeout()
+        lastRecordStopAt = Date()
         state = .idle
         notifier.notify(title: "Audio Input", body: "Recording canceled")
-        AppLogger.log.info("Recording canceled by ESC")
+        log(.info, event: "recording_canceled", message: "Recording canceled by ESC")
     }
 
     private func finishRecording(timeout: Bool = false) {
@@ -113,6 +145,7 @@ final class AppController {
         if cancelCurrentRecording {
             cancelCurrentRecording = false
             clearTimeout()
+            lastRecordStopAt = Date()
             state = .idle
             return
         }
@@ -120,16 +153,18 @@ final class AppController {
         do {
             let recorded = try recorder.stop()
             clearTimeout()
+            lastRecordStopAt = Date()
 
             if recorded.durationMS < config.minRecordMS {
                 try? FileManager.default.removeItem(at: recorded.url)
                 state = .idle
                 notifier.notify(title: "Audio Input", body: "Ignored: recording too short")
+                log(.info, event: "recording_too_short", message: "duration_ms=\(recorded.durationMS)")
                 return
             }
 
             if timeout {
-                notifier.notify(title: "Audio Input", body: "Reached \(Int(config.maxRecordSeconds))s limit, transcribing")
+                notifier.notify(title: "Audio Input", body: "Reached \(settingsStore.settings.maxRecordSeconds)s limit, transcribing")
             }
 
             state = .transcribing
@@ -137,40 +172,109 @@ final class AppController {
         } catch {
             state = .error(error.localizedDescription)
             notifier.notify(title: "Audio Input", body: "Stop recording failed: \(error.localizedDescription)")
+            log(.error, event: "recording_stop_failed", message: error.localizedDescription)
             state = .idle
         }
     }
 
     private func transcribeAndInsert(recorded: RecordedAudio) {
-        let config = self.config
+        let snapshot = settingsStore.settings
         let asrClient = self.asrClient
         let inserter = self.inserter
+        let language = self.config.asrLanguage
 
         Task.detached {
+            defer { try? FileManager.default.removeItem(at: recorded.url) }
+
             do {
                 let audioData = try Data(contentsOf: recorded.url)
-                let text = try await asrClient.recognize(wavData: audioData, language: config.asrLanguage)
+                let text = try await asrClient.recognize(
+                    wavData: audioData,
+                    language: language,
+                    appID: snapshot.appID,
+                    accessToken: snapshot.accessToken
+                )
 
                 await MainActor.run {
                     self.state = .inserting
-                    inserter.paste(text)
+                    inserter.paste(text, keepClipboard: snapshot.keepTranscriptionInClipboard)
                     self.notifier.notify(title: "Audio Input", body: "Inserted \(text.count) chars")
+                    self.log(.info, event: "inserted", message: "chars=\(text.count)")
                     self.state = .idle
                 }
             } catch {
                 await MainActor.run {
                     self.state = .error(error.localizedDescription)
                     self.notifier.notify(title: "Audio Input", body: "Transcription failed: \(error.localizedDescription)")
+                    self.log(.error, event: "transcription_failed", message: error.localizedDescription)
                     self.state = .idle
                 }
             }
-
-            try? FileManager.default.removeItem(at: recorded.url)
         }
     }
 
     private func clearTimeout() {
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+    }
+
+    private func openSettings() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                getSettings: { [weak self] in
+                    self?.settingsStore.settings ?? AppSettings.default(fallbackMaxRecordSeconds: 180, env: [:])
+                },
+                onSave: { [weak self] newSettings in
+                    self?.saveSettings(newSettings)
+                }
+            )
+        }
+
+        settingsWindowController?.show()
+    }
+
+    private func saveSettings(_ newSettings: AppSettings) {
+        settingsStore.update { current in
+            current = newSettings
+        }
+        applySettingsRuntimeEffects()
+        structuredLogger.pruneNow()
+        notifier.notify(title: "Audio Input", body: "Settings saved")
+        log(.info, event: "settings_saved", message: "Settings updated")
+    }
+
+    private func applySettingsRuntimeEffects() {
+        let settings = settingsStore.settings
+        monitor.setHotkeySide(settings.hotkeySide)
+        LaunchAtLoginManager.apply(enabled: settings.launchAtLogin)
+    }
+
+    private func runSelfCheck() {
+        let s = settingsStore.settings
+        let checks: [String] = [
+            "Accessibility: \(PermissionHelper.hasAccessibilityTrust() ? "OK" : "Missing")",
+            "APP_ID: \(s.appID.isEmpty ? "Missing" : "OK")",
+            "ACCESS_TOKEN: \(s.accessToken.isEmpty ? "Missing" : "OK")",
+            "Hotkey: \(s.hotkeySide.rawValue)",
+            "MaxRecord: \(s.maxRecordSeconds)s",
+            "Clipboard: \(s.keepTranscriptionInClipboard ? "Keep" : "Restore")",
+            "LogRetention: \(s.logRetentionDays)d",
+        ]
+
+        let body = checks.joined(separator: " | ")
+        notifier.notify(title: "Audio Input Self Check", body: body)
+        log(.info, event: "self_check", message: body)
+    }
+
+    private func log(_ level: LogLevel, event: String, message: String) {
+        structuredLogger.log(level, event: event, message: message)
+        switch level {
+        case .info:
+            AppLogger.log.info("\(event): \(message)")
+        case .warning:
+            AppLogger.log.warning("\(event): \(message)")
+        case .error:
+            AppLogger.log.error("\(event): \(message)")
+        }
     }
 }

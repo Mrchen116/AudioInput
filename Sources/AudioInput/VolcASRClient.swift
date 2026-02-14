@@ -1,7 +1,7 @@
 import Foundation
 
 protocol ASRClient {
-    func recognize(wavData: Data, language: String) async throws -> String
+    func recognize(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String
 }
 
 final class VolcASRClient: ASRClient {
@@ -13,13 +13,46 @@ final class VolcASRClient: ASRClient {
         self.session = session
     }
 
-    func recognize(wavData: Data, language: String) async throws -> String {
+    func recognize(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String {
+        let cleanAppID = appID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAppID.isEmpty, !cleanToken.isEmpty else {
+            throw AppError.missingCredentials
+        }
+
+        let maxAttempts = 3
+        var attempt = 0
+        var lastError: Error?
+
+        while attempt < maxAttempts {
+            attempt += 1
+            do {
+                return try await recognizeOnce(
+                    wavData: wavData,
+                    language: language,
+                    appID: cleanAppID,
+                    accessToken: cleanToken
+                )
+            } catch {
+                lastError = error
+                if attempt >= maxAttempts || !shouldRetry(error: error) {
+                    throw error
+                }
+                let delayMS = UInt64(pow(2.0, Double(attempt - 1)) * 300)
+                try await Task.sleep(nanoseconds: delayMS * 1_000_000)
+            }
+        }
+
+        throw lastError ?? AppError.emptyTranscription
+    }
+
+    private func recognizeOnce(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String {
         var request = URLRequest(url: config.asrURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(config.appID, forHTTPHeaderField: "X-Api-App-Key")
-        request.setValue(config.accessToken, forHTTPHeaderField: "X-Api-Access-Key")
+        request.setValue(appID, forHTTPHeaderField: "X-Api-App-Key")
+        request.setValue(accessToken, forHTTPHeaderField: "X-Api-Access-Key")
         request.setValue(config.resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
         request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
@@ -31,7 +64,7 @@ final class VolcASRClient: ASRClient {
         audio["language"] = language
 
         let body: [String: Any] = [
-            "user": ["uid": config.appID],
+            "user": ["uid": appID],
             "audio": audio,
             "request": [
                 "model_name": "bigmodel",
@@ -47,10 +80,18 @@ final class VolcASRClient: ASRClient {
             throw NSError(domain: "VolcASRClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"])
         }
 
-        let statusCode = http.value(forHTTPHeaderField: "X-Api-Status-Code") ?? ""
-        if statusCode != "20000000" {
+        let apiStatus = http.value(forHTTPHeaderField: "X-Api-Status-Code") ?? ""
+        if apiStatus != "20000000" {
             let message = http.value(forHTTPHeaderField: "X-Api-Message") ?? "unknown error"
-            throw NSError(domain: "VolcASRClient", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "ASR failed: \(statusCode) \(message)"])
+            let error = NSError(
+                domain: "VolcASRClient",
+                code: http.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "ASR failed: \(apiStatus) \(message)",
+                    "apiStatus": apiStatus,
+                ]
+            )
+            throw error
         }
 
         guard
@@ -63,5 +104,28 @@ final class VolcASRClient: ASRClient {
         }
 
         return text
+    }
+
+    private func shouldRetry(error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed, .notConnectedToInternet:
+                return true
+            default:
+                return false
+            }
+        }
+
+        let ns = error as NSError
+        if ns.domain == "VolcASRClient" {
+            if (500...599).contains(ns.code) {
+                return true
+            }
+            if ns.code == -1 {
+                return true
+            }
+        }
+
+        return false
     }
 }

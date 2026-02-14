@@ -8,10 +8,21 @@ final class HotkeyMonitor {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var isRightCmdDown = false
+    private var isCommandDown = false
+    private var activeKeyCode: CGKeyCode?
 
+    private(set) var hotkeySide: HotkeySide = .right
+
+    private static let leftCommandKeyCode: CGKeyCode = 55
     private static let rightCommandKeyCode: CGKeyCode = 54
     private static let escapeKeyCode: CGKeyCode = 53
+
+    func setHotkeySide(_ side: HotkeySide) {
+        hotkeySide = side
+        isCommandDown = false
+        activeKeyCode = nil
+        fputs("[AudioInput] Hotkey side set to: \(side.rawValue)\n", stderr)
+    }
 
     @discardableResult
     func start() -> Bool {
@@ -57,23 +68,27 @@ final class HotkeyMonitor {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         eventTap = nil
         runLoopSource = nil
-        isRightCmdDown = false
+        isCommandDown = false
+        activeKeyCode = nil
     }
 
     private func handle(eventType: CGEventType, event: CGEvent) {
         if eventType == .flagsChanged {
             let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            guard keyCode == Self.rightCommandKeyCode else { return }
+            guard isAllowedCommandKey(keyCode) else { return }
 
             let currentlyDown = event.flags.contains(.maskCommand)
+            let keyName = keyCode == Self.rightCommandKeyCode ? "Right" : "Left"
 
-            if currentlyDown && !isRightCmdDown {
-                isRightCmdDown = true
-                fputs("[AudioInput] Hotkey: Right Command down\n", stderr)
+            if currentlyDown && !isCommandDown {
+                isCommandDown = true
+                activeKeyCode = keyCode
+                fputs("[AudioInput] Hotkey: \(keyName) Command down\n", stderr)
                 onRightCommandDown?()
-            } else if !currentlyDown && isRightCmdDown {
-                isRightCmdDown = false
-                fputs("[AudioInput] Hotkey: Right Command up\n", stderr)
+            } else if !currentlyDown && isCommandDown && activeKeyCode == keyCode {
+                isCommandDown = false
+                activeKeyCode = nil
+                fputs("[AudioInput] Hotkey: \(keyName) Command up\n", stderr)
                 onRightCommandUp?()
             }
         }
@@ -84,6 +99,17 @@ final class HotkeyMonitor {
                 fputs("[AudioInput] Hotkey: ESC down\n", stderr)
                 onEscDown?()
             }
+        }
+    }
+
+    private func isAllowedCommandKey(_ keyCode: CGKeyCode) -> Bool {
+        switch hotkeySide {
+        case .right:
+            return keyCode == Self.rightCommandKeyCode
+        case .left:
+            return keyCode == Self.leftCommandKeyCode
+        case .both:
+            return keyCode == Self.rightCommandKeyCode || keyCode == Self.leftCommandKeyCode
         }
     }
 }

@@ -60,4 +60,20 @@ final class AudioRecorder: NSObject {
 
         self.currentURL = nil
     }
+
+    static func cleanupStaleTemporaryFiles(olderThanHours: Int = 24) {
+        let tempDir = FileManager.default.temporaryDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return
+        }
+
+        let cutoff = Date().addingTimeInterval(-Double(max(1, olderThanHours)) * 3600)
+        for file in files where file.lastPathComponent.hasPrefix("audioinput-") && file.pathExtension == "wav" {
+            let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+            let modified = values?.contentModificationDate ?? .distantPast
+            if modified < cutoff {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
 }

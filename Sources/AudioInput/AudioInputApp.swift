@@ -9,14 +9,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let config = try AppConfig.load()
+            let settingsStore = SettingsStore(config: config)
+            let structuredLogger = StructuredLogger(retentionDaysProvider: { settingsStore.settings.logRetentionDays })
+
             let controller = AppController(
                 config: config,
+                settingsStore: settingsStore,
                 recorder: AudioRecorder(),
                 asrClient: VolcASRClient(config: config),
                 inserter: TextInserter(),
                 monitor: HotkeyMonitor(),
                 statusBar: StatusBarController(),
-                notifier: Notifier()
+                notifier: Notifier(),
+                structuredLogger: structuredLogger
             )
             self.controller = controller
             controller.start()

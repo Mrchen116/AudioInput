@@ -1,38 +1,67 @@
-# AudioInput (macOS Voice Input)
+# AudioInput（macOS 语音输入）
 
-A native macOS menu-bar voice input app using Volcengine ASR.
+AudioInput 是一个 macOS 菜单栏语音输入工具，使用火山引擎 ASR。
 
-## Behavior
+## 功能
 
-- Hold `Right Command` to record.
-- Release `Right Command` to transcribe and paste text into the focused input.
-- Press `Esc` while recording to cancel (no transcription, no insertion).
+- 按住配置的 `Command` 侧键开始录音（默认右 `Cmd`）。
+- 松开后自动转写并粘贴到当前输入框。
+- 录音中按 `Esc` 立即取消（不转写、不插入）。
 
-## Config
-
-Set values in `.env` (or shell env):
-
-```bash
-APP_ID="your_app_id"
-ACCESS_TOKEN="your_access_token"
-RESOURCE_ID="volc.bigasr.auc_turbo"
-ASR_URL="https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
-ASR_LANGUAGE="auto"
-MAX_RECORD_SECONDS="180"
-MIN_RECORD_MS="180"
-```
-
-## Run
+## 本地运行
 
 ```bash
 swift run AudioInput
 ```
 
-## Required macOS Permissions
+启动后点击菜单栏 `AI` 图标，进入 `Settings...`（设置）填写：
 
-- Microphone
-- Accessibility
-- Input Monitoring (depending on macOS version)
-- Notifications (optional but recommended)
+- `APP_ID`
+- `ACCESS_TOKEN`
 
-Without Accessibility/Input Monitoring permissions, global hotkeys and simulated paste may not work.
+并可配置：
+
+- 触发热键（右 Cmd / 左 Cmd / 左右 Cmd）
+- 最大录音时长（秒）
+- 是否保留识别结果在剪贴板
+- 开机自动启动
+- 日志保留天数
+
+## `.env` 迁移说明
+
+如果 `.env` 中已有 `APP_ID` / `ACCESS_TOKEN`，仅在首次启动时作为设置默认值导入。
+后续以设置窗口保存的数据为准。
+
+## 权限要求
+
+- 麦克风
+- 辅助功能（Accessibility）
+- 输入监控（部分系统版本需要）
+- 通知（可选）
+
+若未授予辅助功能/输入监控权限，全局热键和模拟粘贴可能失效。
+
+## 结构化日志
+
+日志以 JSON Lines 形式落盘：
+
+- `~/Library/Logs/AudioInput/audioinput-YYYY-MM-DD.log`
+
+会按“日志保留天数”自动清理旧日志。
+
+## 打包 `.app`
+
+执行：
+
+```bash
+./scripts/package_app.sh
+```
+
+产物路径：
+
+- `dist/AudioInput.app`
+
+说明：
+
+- 打包脚本会自动 `swift build -c release`
+- 生成的 `Info.plist` 已包含菜单栏模式（`LSUIElement=true`）和麦克风权限说明

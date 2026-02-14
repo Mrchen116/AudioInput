@@ -1,16 +1,29 @@
 import AppKit
 import Foundation
 
-final class StatusBarController {
+final class StatusBarController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let stateItem = NSMenuItem(title: "Status: Idle", action: nil, keyEquivalent: "")
 
-    var onQuit: (() -> Void)?
+    private let settingsItem = NSMenuItem(title: "Settings...", action: #selector(handleOpenSettings), keyEquivalent: ",")
+    private let selfCheckItem = NSMenuItem(title: "Self Check", action: #selector(handleSelfCheck), keyEquivalent: "")
 
-    init() {
+    var onQuit: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
+    var onSelfCheck: (() -> Void)?
+
+    override init() {
+        super.init()
+
         stateItem.isEnabled = false
         menu.addItem(stateItem)
+        menu.addItem(.separator())
+
+        settingsItem.target = self
+        selfCheckItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(selfCheckItem)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(handleQuit), keyEquivalent: "q")
@@ -46,6 +59,14 @@ final class StatusBarController {
             stateLabel = "Error(\(message))"
         }
         fputs("[AudioInput] State: \(stateLabel)\n", stderr)
+    }
+
+    @objc private func handleOpenSettings() {
+        onOpenSettings?()
+    }
+
+    @objc private func handleSelfCheck() {
+        onSelfCheck?()
     }
 
     @objc private func handleQuit() {
