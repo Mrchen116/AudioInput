@@ -61,16 +61,23 @@ final class AppController {
         if !PermissionHelper.requestAccessibilityTrust() {
             notifier.notify(
                 title: "Audio Input",
-                body: "Please enable Accessibility and Input Monitoring for Terminal, then restart app."
+                body: "Please enable Accessibility for AudioInput, then restart app."
+            )
+        }
+
+        if !PermissionHelper.requestInputMonitoringAccess() {
+            notifier.notify(
+                title: "Audio Input",
+                body: "Please enable Input Monitoring for AudioInput, then restart app."
             )
         }
 
         let monitorStarted = monitor.start()
-        if !monitorStarted || !PermissionHelper.hasAccessibilityTrust() {
+        if !monitorStarted || !PermissionHelper.hasInputMonitoringAccess() {
             state = .error("Hotkey monitor unavailable")
             notifier.notify(
                 title: "Audio Input",
-                body: "Hotkeys unavailable. Grant Accessibility/Input Monitoring and relaunch."
+                body: "Hotkeys unavailable. Grant Input Monitoring and relaunch."
             )
             log(.error, event: "hotkey_monitor_unavailable", message: "Failed to start hotkey monitor")
             return
@@ -253,6 +260,7 @@ final class AppController {
         let s = settingsStore.settings
         let checks: [String] = [
             "Accessibility: \(PermissionHelper.hasAccessibilityTrust() ? "OK" : "Missing")",
+            "Input Monitoring: \(PermissionHelper.hasInputMonitoringAccess() ? "OK" : "Missing")",
             "APP_ID: \(s.appID.isEmpty ? "Missing" : "OK")",
             "ACCESS_TOKEN: \(s.accessToken.isEmpty ? "Missing" : "OK")",
             "Hotkey: \(s.hotkeySide.rawValue)",

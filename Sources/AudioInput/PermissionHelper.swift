@@ -1,6 +1,7 @@
 import AVFoundation
 import ApplicationServices
 import Foundation
+import IOKit.hid
 
 enum PermissionHelper {
     static func requestAccessibilityTrust() -> Bool {
@@ -10,6 +11,14 @@ enum PermissionHelper {
 
     static func hasAccessibilityTrust() -> Bool {
         AXIsProcessTrusted()
+    }
+
+    static func requestInputMonitoringAccess() -> Bool {
+        IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    static func hasInputMonitoringAccess() -> Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     }
 
     static func requestMicrophoneAccess() {

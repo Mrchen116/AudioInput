@@ -1,115 +1,114 @@
 import ApplicationServices
 import Foundation
+import IOKit.hid
 
 final class HotkeyMonitor {
     var onRightCommandDown: (() -> Void)?
     var onRightCommandUp: (() -> Void)?
     var onEscDown: (() -> Void)?
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private var hidManager: IOHIDManager?
     private var isCommandDown = false
-    private var activeKeyCode: CGKeyCode?
+    private var activeUsage: UInt32?
 
     private(set) var hotkeySide: HotkeySide = .right
 
-    private static let leftCommandKeyCode: CGKeyCode = 55
-    private static let rightCommandKeyCode: CGKeyCode = 54
-    private static let escapeKeyCode: CGKeyCode = 53
+    private static let keyboardUsagePage: UInt32 = 0x07
+    private static let escapeUsage: UInt32 = 0x29
+    private static let leftCommandUsage: UInt32 = 0xE3
+    private static let rightCommandUsage: UInt32 = 0xE7
 
     func setHotkeySide(_ side: HotkeySide) {
         hotkeySide = side
         isCommandDown = false
-        activeKeyCode = nil
+        activeUsage = nil
         fputs("[AudioInput] Hotkey side set to: \(side.rawValue)\n", stderr)
     }
 
     @discardableResult
     func start() -> Bool {
-        guard eventTap == nil else { return true }
+        guard hidManager == nil else { return true }
 
-        let events = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
-        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
-            guard let userInfo else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-            monitor.handle(eventType: type, event: event)
-            return Unmanaged.passUnretained(event)
-        }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(events),
-            callback: callback,
-            userInfo: selfPtr
-        ) else {
-            AppLogger.log.error("Failed to create CGEvent tap. Enable Accessibility/Input Monitoring permissions.")
+        guard PermissionHelper.hasInputMonitoringAccess() else {
+            AppLogger.log.error("Input Monitoring permission is required for keyboard HID events.")
             return false
         }
 
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let matching = [
+            kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+            kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Keyboard,
+        ] as CFDictionary
 
-        eventTap = tap
-        runLoopSource = source
+        IOHIDManagerSetDeviceMatching(manager, matching)
+
+        let callback: IOHIDValueCallback = { context, _, _, value in
+            guard let context else { return }
+            let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(context).takeUnretainedValue()
+            monitor.handle(value: value)
+        }
+        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        IOHIDManagerRegisterInputValueCallback(manager, callback, selfPtr)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+
+        let result = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard result == kIOReturnSuccess else {
+            AppLogger.log.error("Failed to open IOHIDManager: \(result)")
+            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+            return false
+        }
+
+        hidManager = manager
         return true
     }
 
     func stop() {
-        guard let tap = eventTap, let source = runLoopSource else { return }
-        CGEvent.tapEnable(tap: tap, enable: false)
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        eventTap = nil
-        runLoopSource = nil
+        guard let manager = hidManager else { return }
+        IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+        hidManager = nil
         isCommandDown = false
-        activeKeyCode = nil
+        activeUsage = nil
     }
 
-    private func handle(eventType: CGEventType, event: CGEvent) {
-        if eventType == .flagsChanged {
-            let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            guard isAllowedCommandKey(keyCode) else { return }
+    private func handle(value: IOHIDValue) {
+        let element = IOHIDValueGetElement(value)
+        let usagePage = IOHIDElementGetUsagePage(element)
+        guard usagePage == Self.keyboardUsagePage else { return }
 
-            let currentlyDown = event.flags.contains(.maskCommand)
-            let keyName = keyCode == Self.rightCommandKeyCode ? "Right" : "Left"
+        let usage = IOHIDElementGetUsage(element)
+        let isPressed = IOHIDValueGetIntegerValue(value) != 0
 
-            if currentlyDown && !isCommandDown {
-                isCommandDown = true
-                activeKeyCode = keyCode
-                fputs("[AudioInput] Hotkey: \(keyName) Command down\n", stderr)
-                onRightCommandDown?()
-            } else if !currentlyDown && isCommandDown && activeKeyCode == keyCode {
-                isCommandDown = false
-                activeKeyCode = nil
-                fputs("[AudioInput] Hotkey: \(keyName) Command up\n", stderr)
-                onRightCommandUp?()
-            }
+        if usage == Self.escapeUsage && isPressed {
+            fputs("[AudioInput] Hotkey: ESC down\n", stderr)
+            onEscDown?()
+            return
         }
 
-        if eventType == .keyDown {
-            let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            if keyCode == Self.escapeKeyCode {
-                fputs("[AudioInput] Hotkey: ESC down\n", stderr)
-                onEscDown?()
-            }
+        guard isAllowedCommandUsage(usage) else { return }
+
+        let keyName = usage == Self.rightCommandUsage ? "Right" : "Left"
+        if isPressed && !isCommandDown {
+            isCommandDown = true
+            activeUsage = usage
+            fputs("[AudioInput] Hotkey: \(keyName) Command down\n", stderr)
+            onRightCommandDown?()
+        } else if !isPressed && isCommandDown && activeUsage == usage {
+            isCommandDown = false
+            activeUsage = nil
+            fputs("[AudioInput] Hotkey: \(keyName) Command up\n", stderr)
+            onRightCommandUp?()
         }
     }
 
-    private func isAllowedCommandKey(_ keyCode: CGKeyCode) -> Bool {
+    private func isAllowedCommandUsage(_ usage: UInt32) -> Bool {
         switch hotkeySide {
         case .right:
-            return keyCode == Self.rightCommandKeyCode
+            return usage == Self.rightCommandUsage
         case .left:
-            return keyCode == Self.leftCommandKeyCode
+            return usage == Self.leftCommandUsage
         case .both:
-            return keyCode == Self.rightCommandKeyCode || keyCode == Self.leftCommandKeyCode
+            return usage == Self.rightCommandUsage || usage == Self.leftCommandUsage
         }
     }
 }
