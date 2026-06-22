@@ -1,7 +1,7 @@
 import Foundation
 
 protocol ASRClient {
-    func recognize(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String
+    func recognize(wavData: Data, language: String, appID: String, accessToken: String, enableDDC: Bool, hotwords: [String]) async throws -> String
 }
 
 final class VolcASRClient: ASRClient {
@@ -13,7 +13,7 @@ final class VolcASRClient: ASRClient {
         self.session = session
     }
 
-    func recognize(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String {
+    func recognize(wavData: Data, language: String, appID: String, accessToken: String, enableDDC: Bool, hotwords: [String]) async throws -> String {
         let cleanAppID = appID.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanAppID.isEmpty, !cleanToken.isEmpty else {
@@ -31,7 +31,9 @@ final class VolcASRClient: ASRClient {
                     wavData: wavData,
                     language: language,
                     appID: cleanAppID,
-                    accessToken: cleanToken
+                    accessToken: cleanToken,
+                    enableDDC: enableDDC,
+                    hotwords: hotwords
                 )
             } catch {
                 lastError = error
@@ -46,7 +48,7 @@ final class VolcASRClient: ASRClient {
         throw lastError ?? AppError.emptyTranscription
     }
 
-    private func recognizeOnce(wavData: Data, language: String, appID: String, accessToken: String) async throws -> String {
+    private func recognizeOnce(wavData: Data, language: String, appID: String, accessToken: String, enableDDC: Bool, hotwords: [String]) async throws -> String {
         var request = URLRequest(url: config.asrURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
@@ -63,14 +65,21 @@ final class VolcASRClient: ASRClient {
         ]
         audio["language"] = language
 
+        var requestBody: [String: Any] = [
+            "model_name": "bigmodel",
+            "enable_itn": true,
+            "enable_punc": true,
+            "enable_ddc": enableDDC,
+        ]
+
+        if !hotwords.isEmpty, let contextJSON = makeHotwordsContextJSON(hotwords: hotwords) {
+            requestBody["context"] = contextJSON
+        }
+
         let body: [String: Any] = [
             "user": ["uid": appID],
             "audio": audio,
-            "request": [
-                "model_name": "bigmodel",
-                "enable_itn": true,
-                "enable_punc": true,
-            ],
+            "request": requestBody,
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
@@ -127,5 +136,14 @@ final class VolcASRClient: ASRClient {
         }
 
         return false
+    }
+
+    private func makeHotwordsContextJSON(hotwords: [String]) -> String? {
+        let entries = hotwords.map { ["word": $0] }
+        let context: [String: Any] = ["hotwords": entries]
+        guard let data = try? JSONSerialization.data(withJSONObject: context, options: []) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 }

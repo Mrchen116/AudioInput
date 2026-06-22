@@ -199,7 +199,9 @@ final class AppController {
                     wavData: audioData,
                     language: language,
                     appID: snapshot.appID,
-                    accessToken: snapshot.accessToken
+                    accessToken: snapshot.accessToken,
+                    enableDDC: snapshot.enableDDC,
+                    hotwords: snapshot.hotwords
                 )
 
                 await MainActor.run {
@@ -267,6 +269,8 @@ final class AppController {
             "MaxRecord: \(s.maxRecordSeconds)s",
             "Clipboard: \(s.keepTranscriptionInClipboard ? "Keep" : "Restore")",
             "LogRetention: \(s.logRetentionDays)d",
+            "EnableDDC: \(s.enableDDC ? "On" : "Off")",
+            "Hotwords: \(s.hotwords.joined(separator: ", "))",
         ]
 
         let body = checks.joined(separator: " | ")

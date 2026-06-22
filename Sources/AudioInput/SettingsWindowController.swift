@@ -9,6 +9,8 @@ final class SettingsWindowController: NSWindowController {
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let keepClipboardButton = NSButton(checkboxWithTitle: "保留识别结果到剪贴板", target: nil, action: nil)
     private let launchAtLoginButton = NSButton(checkboxWithTitle: "开机自动启动", target: nil, action: nil)
+    private let enableDDCButton = NSButton(checkboxWithTitle: "启用语义顺滑 (enable_ddc)", target: nil, action: nil)
+    private let hotwordsField = NSTextField(string: "")
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
 
     private let getSettings: () -> AppSettings
@@ -19,7 +21,7 @@ final class SettingsWindowController: NSWindowController {
         self.onSave = onSave
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -55,8 +57,10 @@ final class SettingsWindowController: NSWindowController {
         let hotkeyRow = makeRow(labelText: "触发热键", labelWidth: labelWidth, field: hotkeyPopup, rowHeight: rowHeight)
         let maxSecondsRow = makeRow(labelText: "最大录音时长(秒)", labelWidth: labelWidth, field: maxSecondsField, rowHeight: rowHeight)
         let retentionRow = makeRow(labelText: "日志保留天数", labelWidth: labelWidth, field: retentionDaysField, rowHeight: rowHeight)
+        let hotwordsRow = makeRow(labelText: "热词（逗号分隔）", labelWidth: labelWidth, field: hotwordsField, rowHeight: rowHeight)
+        let enableDDCRow = makeRow(labelText: "", labelWidth: labelWidth, field: enableDDCButton, rowHeight: rowHeight)
 
-        let formStack = NSStackView(views: [appIDRow, tokenRow, hotkeyRow, maxSecondsRow, retentionRow])
+        let formStack = NSStackView(views: [appIDRow, tokenRow, hotkeyRow, maxSecondsRow, retentionRow, hotwordsRow, enableDDCRow])
         formStack.orientation = .vertical
         formStack.alignment = .leading
         formStack.spacing = 12
@@ -135,6 +139,8 @@ final class SettingsWindowController: NSWindowController {
         retentionDaysField.stringValue = String(settings.logRetentionDays)
         keepClipboardButton.state = settings.keepTranscriptionInClipboard ? .on : .off
         launchAtLoginButton.state = settings.launchAtLogin ? .on : .off
+        enableDDCButton.state = settings.enableDDC ? .on : .off
+        hotwordsField.stringValue = settings.hotwords.joined(separator: ", ")
     }
 
     private func selectHotkey(side: HotkeySide) {
@@ -159,6 +165,8 @@ final class SettingsWindowController: NSWindowController {
         let retentionDays = max(1, Int(retentionDaysField.stringValue) ?? old.logRetentionDays)
         let keepClipboard = keepClipboardButton.state == .on
         let launchAtLogin = launchAtLoginButton.state == .on
+        let enableDDC = enableDDCButton.state == .on
+        let hotwords = parseHotwords(hotwordsField.stringValue)
 
         let settings = AppSettings(
             appID: appID,
@@ -167,10 +175,19 @@ final class SettingsWindowController: NSWindowController {
             maxRecordSeconds: maxSeconds,
             keepTranscriptionInClipboard: keepClipboard,
             launchAtLogin: launchAtLogin,
-            logRetentionDays: retentionDays
+            logRetentionDays: retentionDays,
+            enableDDC: enableDDC,
+            hotwords: hotwords
         )
 
         onSave(settings)
         close()
+    }
+
+    private func parseHotwords(_ raw: String) -> [String] {
+        raw
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }
